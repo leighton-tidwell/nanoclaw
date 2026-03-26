@@ -210,6 +210,20 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Mount host GitHub CLI config so containers can use `gh` (PRs, issues, etc.)
+  const ghConfigDir = path.join(
+    process.env.HOME || '/root',
+    '.config',
+    'gh',
+  );
+  if (fs.existsSync(ghConfigDir)) {
+    mounts.push({
+      hostPath: ghConfigDir,
+      containerPath: '/home/node/.config/gh',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(

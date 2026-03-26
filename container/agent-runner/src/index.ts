@@ -428,11 +428,12 @@ async function runQuery(
         },
         ...(process.env.LINEAR_API_KEY ? {
           linear: {
-            command: 'npx',
-            args: ['-y', '@modelcontextprotocol/server-linear'],
-            env: {
-              LINEAR_API_KEY: process.env.LINEAR_API_KEY,
-            },
+            command: 'mcp-remote',
+            args: [
+              'https://mcp.linear.app/mcp',
+              '--header',
+              `Authorization: Bearer ${process.env.LINEAR_API_KEY}`,
+            ],
           },
         } : {}),
       },
