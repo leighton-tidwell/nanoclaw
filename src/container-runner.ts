@@ -211,11 +211,7 @@ function buildVolumeMounts(
   });
 
   // Mount host GitHub CLI config so containers can use `gh` (PRs, issues, etc.)
-  const ghConfigDir = path.join(
-    process.env.HOME || '/root',
-    '.config',
-    'gh',
-  );
+  const ghConfigDir = path.join(process.env.HOME || '/root', '.config', 'gh');
   if (fs.existsSync(ghConfigDir)) {
     mounts.push({
       hostPath: ghConfigDir,
