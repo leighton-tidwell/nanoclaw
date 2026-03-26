@@ -409,7 +409,8 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        'mcp__nanoclaw__*',
+        'mcp__linear__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -425,6 +426,15 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        ...(process.env.LINEAR_API_KEY ? {
+          linear: {
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-linear'],
+            env: {
+              LINEAR_API_KEY: process.env.LINEAR_API_KEY,
+            },
+          },
+        } : {}),
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],

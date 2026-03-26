@@ -8,6 +8,7 @@ import { isValidTimezone } from './timezone.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'LINEAR_API_KEY',
   'ONECLI_URL',
   'TELEGRAM_BOT_POOL',
   'TZ',
@@ -78,7 +79,16 @@ export function getTriggerPattern(trigger?: string): RegExp {
 
 export const TRIGGER_PATTERN = buildTriggerPattern(DEFAULT_TRIGGER);
 
-export const TELEGRAM_BOT_POOL = (process.env.TELEGRAM_BOT_POOL || envConfig.TELEGRAM_BOT_POOL || '')
+// Forward integration keys to process.env so container-runner can pass them to containers
+if (envConfig.LINEAR_API_KEY && !process.env.LINEAR_API_KEY) {
+  process.env.LINEAR_API_KEY = envConfig.LINEAR_API_KEY;
+}
+
+export const TELEGRAM_BOT_POOL = (
+  process.env.TELEGRAM_BOT_POOL ||
+  envConfig.TELEGRAM_BOT_POOL ||
+  ''
+)
   .split(',')
   .map((t) => t.trim())
   .filter(Boolean);
