@@ -62,6 +62,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { parseTopicJid, toTopicJid } from './topic-key.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -197,7 +198,9 @@ export function _setRegisteredGroups(
  * Called by the GroupQueue when it's this group's turn.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
+  // chatJid may be a composite topic key (e.g. "tg:-100123#5")
+  const { baseJid, threadId } = parseTopicJid(chatJid);
+  const group = registeredGroups[baseJid];
   if (!group) return true;
 
   const channel = findChannel(channels, chatJid);
@@ -231,15 +234,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
 
+  const lastMessage = missedMessages[missedMessages.length - 1];
+
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+  lastAgentTimestamp[chatJid] = lastMessage.timestamp;
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: missedMessages.length, threadId },
     'Processing messages',
   );
 
@@ -272,6 +276,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
+        // chatJid contains the topic suffix — channel.sendMessage decomposes it
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -321,7 +326,12 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  const { threadId } = parseTopicJid(chatJid);
+  // Per-topic sessions: each topic gets its own session key
+  const sessionKey = threadId
+    ? `${group.folder}#${threadId}`
+    : group.folder;
+  const sessionId = sessions[sessionKey];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -352,8 +362,8 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          sessions[sessionKey] = output.newSessionId;
+          setSession(sessionKey, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -369,15 +379,16 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        threadId,
       },
-      (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
+      (proc, containerName, ipcDir) =>
+        queue.registerProcess(chatJid, proc, containerName, group.folder, ipcDir),
       wrappedOnOutput,
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      sessions[sessionKey] = output.newSessionId;
+      setSession(sessionKey, output.newSessionId);
     }
 
     if (output.status === 'error') {
@@ -420,24 +431,33 @@ async function startMessageLoop(): Promise<void> {
         lastTimestamp = newTimestamp;
         saveState();
 
-        // Deduplicate by group
-        const messagesByGroup = new Map<string, NewMessage[]>();
+        // Group messages by composite topic key (chatJid#threadId)
+        // so each topic is routed independently
+        const messagesByTopic = new Map<string, NewMessage[]>();
         for (const msg of messages) {
-          const existing = messagesByGroup.get(msg.chat_jid);
+          const routingKey = toTopicJid(
+            msg.chat_jid,
+            msg.thread_id || undefined,
+          );
+          const existing = messagesByTopic.get(routingKey);
           if (existing) {
             existing.push(msg);
           } else {
-            messagesByGroup.set(msg.chat_jid, [msg]);
+            messagesByTopic.set(routingKey, [msg]);
           }
         }
 
-        for (const [chatJid, groupMessages] of messagesByGroup) {
-          const group = registeredGroups[chatJid];
+        for (const [topicJid, groupMessages] of messagesByTopic) {
+          const { baseJid } = parseTopicJid(topicJid);
+          const group = registeredGroups[baseJid];
           if (!group) continue;
 
-          const channel = findChannel(channels, chatJid);
+          const channel = findChannel(channels, topicJid);
           if (!channel) {
-            logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+            logger.warn(
+              { topicJid },
+              'No channel owns JID, skipping messages',
+            );
             continue;
           }
 
@@ -454,7 +474,7 @@ async function startMessageLoop(): Promise<void> {
               (m) =>
                 triggerPattern.test(m.content.trim()) &&
                 (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+                  isTriggerAllowed(topicJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
           }
@@ -462,31 +482,33 @@ async function startMessageLoop(): Promise<void> {
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
           const allPending = getMessagesSince(
-            chatJid,
-            lastAgentTimestamp[chatJid] || '',
+            topicJid,
+            lastAgentTimestamp[topicJid] || '',
             ASSISTANT_NAME,
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(topicJid, formatted)) {
+            const lastPipedMsg = messagesToSend[messagesToSend.length - 1];
             logger.debug(
-              { chatJid, count: messagesToSend.length },
+              { topicJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
+            lastAgentTimestamp[topicJid] = lastPipedMsg.timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
             channel
-              .setTyping?.(chatJid, true)
+              .setTyping?.(topicJid, true)
               ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+                logger.warn(
+                  { topicJid, err },
+                  'Failed to set typing indicator',
+                ),
               );
           } else {
             // No active container — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
+            queue.enqueueMessageCheck(topicJid);
           }
         }
       }
@@ -598,8 +620,11 @@ async function main(): Promise<void> {
         return;
       }
 
+      // chatJid may be a composite topic key — use base JID for group lookups
+      const { baseJid } = parseTopicJid(chatJid);
+
       // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[baseJid]) {
         const cfg = loadSenderAllowlist();
         if (
           shouldDropMessage(chatJid, cfg) &&
@@ -674,6 +699,7 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       const text = formatOutbound(rawText, channel.name as ChannelType);
       if (!text) return Promise.resolve();
+      // jid may be composite (tg:123#5) — channel.sendMessage decomposes it
       return channel.sendMessage(jid, text);
     },
     registeredGroups: () => registeredGroups,

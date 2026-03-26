@@ -10,6 +10,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { sendPoolMessage } from './channels/telegram.js';
+import { parseTopicJid, toTopicJid } from './topic-key.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -67,8 +68,31 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
     for (const sourceGroup of groupFolders) {
       const isMain = folderIsMain.get(sourceGroup) === true;
-      const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
-      const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+
+      // Collect all IPC directories for this group: base dir + topic subdirs
+      const groupIpcBase = path.join(ipcBaseDir, sourceGroup);
+      const ipcDirs: { dir: string; threadId?: string }[] = [
+        { dir: groupIpcBase },
+      ];
+      try {
+        for (const sub of fs.readdirSync(groupIpcBase)) {
+          if (
+            sub.startsWith('topic-') &&
+            fs.statSync(path.join(groupIpcBase, sub)).isDirectory()
+          ) {
+            ipcDirs.push({
+              dir: path.join(groupIpcBase, sub),
+              threadId: sub.slice('topic-'.length),
+            });
+          }
+        }
+      } catch {
+        /* ignore errors listing subdirs */
+      }
+
+      for (const { dir: ipcDir, threadId: topicThreadId } of ipcDirs) {
+      const messagesDir = path.join(ipcDir, 'messages');
+      const tasksDir = path.join(ipcDir, 'tasks');
 
       // Process messages from this group's IPC directory
       try {
@@ -81,33 +105,40 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
+                // Resolve the outbound JID: if this IPC came from a topic container,
+                // construct a composite key so the reply goes to the right topic
+                const { baseJid } = parseTopicJid(data.chatJid);
+                const outboundJid = topicThreadId
+                  ? toTopicJid(baseJid, topicThreadId)
+                  : data.chatJid;
+
                 // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
+                const targetGroup = registeredGroups[baseJid];
                 if (
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
                   if (
                     data.sender &&
-                    data.chatJid.startsWith('tg:') &&
+                    outboundJid.startsWith('tg:') &&
                     TELEGRAM_BOT_POOL.length > 0
                   ) {
                     await sendPoolMessage(
-                      data.chatJid,
+                      outboundJid,
                       data.text,
                       data.sender,
                       sourceGroup,
                     );
                   } else {
-                    await deps.sendMessage(data.chatJid, data.text);
+                    await deps.sendMessage(outboundJid, data.text);
                   }
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
+                    { chatJid: outboundJid, sourceGroup, sender: data.sender },
                     'IPC message sent',
                   );
                 } else {
                   logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: baseJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
                   );
                 }
@@ -164,6 +195,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
+      } // end ipcDirs loop
     }
 
     setTimeout(processIpcFiles, IPC_POLL_INTERVAL);

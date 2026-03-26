@@ -5,6 +5,7 @@ import path from 'path';
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { parseTopicJid } from './topic-key.js';
 import {
   NewMessage,
   RegisteredGroup,
@@ -96,6 +97,13 @@ function createSchema(database: Database.Database): void {
   // Add script column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN script TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
+  // Add thread_id column if it doesn't exist (migration for topic/thread support)
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT`);
   } catch {
     /* column already exists */
   }
@@ -273,17 +281,20 @@ export function setLastGroupSync(): void {
  * Only call this for registered groups where message history is needed.
  */
 export function storeMessage(msg: NewMessage): void {
+  // Decompose composite topic JID: store base JID in chat_jid, thread in thread_id
+  const { baseJid, threadId } = parseTopicJid(msg.chat_jid);
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
-    msg.chat_jid,
+    baseJid,
     msg.sender,
     msg.sender_name,
     msg.content,
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    threadId || msg.thread_id || null,
   );
 }
 
@@ -328,7 +339,7 @@ export function getNewMessages(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, thread_id
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -351,28 +362,46 @@ export function getNewMessages(
 }
 
 export function getMessagesSince(
-  chatJid: string,
+  topicJid: string,
   sinceTimestamp: string,
   botPrefix: string,
   limit: number = 200,
 ): NewMessage[] {
+  // Decompose composite topic JID to filter by base chat + thread
+  const { baseJid, threadId } = parseTopicJid(topicJid);
+
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   // Subquery takes the N most recent, outer query re-sorts chronologically.
-  const sql = `
+  const sql = threadId
+    ? `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, thread_id
       FROM messages
-      WHERE chat_jid = ? AND timestamp > ?
+      WHERE chat_jid = ? AND thread_id = ? AND timestamp > ?
+        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND content != '' AND content IS NOT NULL
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) ORDER BY timestamp
+  `
+    : `
+    SELECT * FROM (
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me, thread_id
+      FROM messages
+      WHERE chat_jid = ? AND (thread_id IS NULL OR thread_id = '1') AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
   `;
-  return db
-    .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+
+  const params = threadId
+    ? [baseJid, threadId, sinceTimestamp, `${botPrefix}:%`, limit]
+    : [baseJid, sinceTimestamp, `${botPrefix}:%`, limit];
+
+  return db.prepare(sql).all(...params) as NewMessage[];
 }
 
 export function createTask(
