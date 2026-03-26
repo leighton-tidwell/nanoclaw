@@ -24,7 +24,6 @@ interface GroupState {
   process: ChildProcess | null;
   containerName: string | null;
   groupFolder: string | null;
-  ipcDir: string | null;
   retryCount: number;
 }
 
@@ -49,7 +48,6 @@ export class GroupQueue {
         process: null,
         containerName: null,
         groupFolder: null,
-        ipcDir: null,
         retryCount: 0,
       };
       this.groups.set(groupJid, state);
@@ -136,13 +134,11 @@ export class GroupQueue {
     proc: ChildProcess,
     containerName: string,
     groupFolder?: string,
-    ipcDir?: string,
   ): void {
     const state = this.getGroup(groupJid);
     state.process = proc;
     state.containerName = containerName;
     if (groupFolder) state.groupFolder = groupFolder;
-    if (ipcDir) state.ipcDir = ipcDir;
   }
 
   /**
@@ -167,9 +163,7 @@ export class GroupQueue {
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
 
-    const inputDir = state.ipcDir
-      ? path.join(state.ipcDir, 'input')
-      : path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {
       fs.mkdirSync(inputDir, { recursive: true });
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
@@ -190,9 +184,7 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder) return;
 
-    const inputDir = state.ipcDir
-      ? path.join(state.ipcDir, 'input')
-      : path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {
       fs.mkdirSync(inputDir, { recursive: true });
       fs.writeFileSync(path.join(inputDir, '_close'), '');
@@ -234,7 +226,6 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
-      state.ipcDir = null;
       this.activeCount--;
       this.drainGroup(groupJid);
     }
@@ -264,7 +255,6 @@ export class GroupQueue {
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
-      state.ipcDir = null;
       this.activeCount--;
       this.drainGroup(groupJid);
     }

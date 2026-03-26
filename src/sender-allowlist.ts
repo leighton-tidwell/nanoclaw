@@ -2,7 +2,6 @@ import fs from 'fs';
 
 import { SENDER_ALLOWLIST_PATH } from './config.js';
 import { logger } from './logger.js';
-import { parseTopicJid } from './topic-key.js';
 
 export interface ChatAllowlistEntry {
   allow: '*' | string[];
@@ -93,10 +92,7 @@ function getEntry(
   chatJid: string,
   cfg: SenderAllowlistConfig,
 ): ChatAllowlistEntry {
-  // Try exact match (supports per-topic config), fall back to base JID
-  if (cfg.chats[chatJid]) return cfg.chats[chatJid];
-  const { baseJid } = parseTopicJid(chatJid);
-  return cfg.chats[baseJid] ?? cfg.default;
+  return cfg.chats[chatJid] ?? cfg.default;
 }
 
 export function isSenderAllowed(

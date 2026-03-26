@@ -43,7 +43,6 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
-  threadId?: string;
 }
 
 export interface ContainerOutput {
@@ -62,8 +61,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
-  threadId?: string,
-): { mounts: VolumeMount[]; ipcDir: string } {
+): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
   const groupDir = resolveGroupFolderPath(group.folder);
@@ -117,15 +115,12 @@ function buildVolumeMounts(
     }
   }
 
-  // Per-group (and per-topic) Claude sessions directory
-  // Each group/topic gets their own .claude/ to prevent cross-session access
-  const sessionSubdir = threadId
-    ? path.join(group.folder, `topic-${threadId}`)
-    : group.folder;
+  // Per-group Claude sessions directory (isolated from other groups)
+  // Each group gets their own .claude/ to prevent cross-group session access
   const groupSessionsDir = path.join(
     DATA_DIR,
     'sessions',
-    sessionSubdir,
+    group.folder,
     '.claude',
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
@@ -170,12 +165,9 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Per-group (and per-topic) IPC namespace
-  // Topics get their own IPC subdirectory to prevent cross-topic message bleed
-  const baseIpcDir = resolveGroupIpcPath(group.folder);
-  const groupIpcDir = threadId
-    ? path.join(baseIpcDir, `topic-${threadId}`)
-    : baseIpcDir;
+  // Per-group IPC namespace: each group gets its own IPC directory
+  // This prevents cross-group privilege escalation via IPC
+  const groupIpcDir = resolveGroupIpcPath(group.folder);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
@@ -219,7 +211,11 @@ function buildVolumeMounts(
   });
 
   // Mount host GitHub CLI config so containers can use `gh` (PRs, issues, etc.)
-  const ghConfigDir = path.join(process.env.HOME || '/root', '.config', 'gh');
+  const ghConfigDir = path.join(
+    process.env.HOME || '/root',
+    '.config',
+    'gh',
+  );
   if (fs.existsSync(ghConfigDir)) {
     mounts.push({
       hostPath: ghConfigDir,
@@ -238,7 +234,7 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
-  return { mounts, ipcDir: groupIpcDir };
+  return mounts;
 }
 
 async function buildContainerArgs(
@@ -300,7 +296,7 @@ async function buildContainerArgs(
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
-  onProcess: (proc: ChildProcess, containerName: string, ipcDir: string) => void,
+  onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
@@ -308,10 +304,9 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const { mounts, ipcDir } = buildVolumeMounts(group, input.isMain, input.threadId);
+  const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const topicSuffix = input.threadId ? `-t${input.threadId}` : '';
-  const containerName = `nanoclaw-${safeName}${topicSuffix}-${Date.now()}`;
+  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   // Main group uses the default OneCLI agent; others use their own agent.
   const agentIdentifier = input.isMain
     ? undefined
@@ -353,7 +348,7 @@ export async function runContainerAgent(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    onProcess(container, containerName, ipcDir);
+    onProcess(container, containerName);
 
     let stdout = '';
     let stderr = '';
