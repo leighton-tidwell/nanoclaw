@@ -337,6 +337,66 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+server.tool(
+  'create_topic',
+  'Create a new forum topic (thread) in the Telegram group. Use this to organize work into separate topics — each topic gets its own independent session and context. Returns the new topic\'s thread ID.',
+  {
+    name: z
+      .string()
+      .min(1)
+      .max(128)
+      .describe(
+        'Topic name (1-128 characters). Use descriptive names like "AUTH-1234: Fix login flow" or "Backend refactor".',
+      ),
+  },
+  async (args) => {
+    const data = {
+      type: 'create_topic',
+      chatJid,
+      name: args.name,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    const filename = writeIpcFile(TASKS_DIR, data);
+
+    // Wait for the host to process and write back the result
+    const resultPath = path.join(TASKS_DIR, `${filename}.result`);
+    const maxWait = 10000;
+    const start = Date.now();
+    while (Date.now() - start < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        fs.unlinkSync(resultPath);
+        if (result.error) {
+          return {
+            content: [
+              { type: 'text' as const, text: `Failed to create topic: ${result.error}` },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Topic "${result.name}" created (thread_id: ${result.threadId}). Messages in this topic will have their own session.`,
+            },
+          ],
+        };
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    return {
+      content: [
+        { type: 'text' as const, text: 'Topic creation timed out. The host may still process it.' },
+      ],
+      isError: true,
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
