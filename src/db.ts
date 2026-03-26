@@ -66,13 +66,6 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
 
-    CREATE TABLE IF NOT EXISTS topic_names (
-      chat_jid TEXT NOT NULL,
-      thread_id TEXT NOT NULL,
-      name TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      PRIMARY KEY (chat_jid, thread_id)
-    );
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -593,30 +586,6 @@ export function getAllSessions(): Record<string, string> {
     result[row.group_folder] = row.session_id;
   }
   return result;
-}
-
-// --- Topic name accessors ---
-
-export function setTopicName(
-  chatJid: string,
-  threadId: string,
-  name: string,
-): void {
-  db.prepare(
-    'INSERT OR REPLACE INTO topic_names (chat_jid, thread_id, name, created_at) VALUES (?, ?, ?, ?)',
-  ).run(chatJid, threadId, name, new Date().toISOString());
-}
-
-export function getTopicName(
-  chatJid: string,
-  threadId: string,
-): string | undefined {
-  const row = db
-    .prepare(
-      'SELECT name FROM topic_names WHERE chat_jid = ? AND thread_id = ?',
-    )
-    .get(chatJid, threadId) as { name: string } | undefined;
-  return row?.name;
 }
 
 // --- Registered group accessors ---

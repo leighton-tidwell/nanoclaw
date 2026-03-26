@@ -2,7 +2,6 @@ import https from 'https';
 import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
-import { setTopicName } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { parseTopicJid, toTopicJid, normalizeThreadId } from '../topic-key.js';
@@ -400,41 +399,6 @@ export class TelegramChannel implements Channel {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
   }
-
-  /**
-   * Create a new forum topic in this chat.
-   * Returns the composite topic JID and topic name.
-   */
-  async createTopic(
-    chatJid: string,
-    name: string,
-  ): Promise<{ topicJid: string; threadId: string; name: string }> {
-    if (!this.bot) throw new Error('Telegram bot not initialized');
-    const numericId = chatJid.replace(/^tg:/, '');
-    const result = await this.bot.api.createForumTopic(
-      parseInt(numericId, 10),
-      name,
-    );
-    const threadId = result.message_thread_id.toString();
-    // Persist topic name in SQLite
-    setTopicName(chatJid, threadId, result.name);
-    logger.info(
-      { chatJid, name: result.name, threadId },
-      'Forum topic created',
-    );
-    return {
-      topicJid: toTopicJid(chatJid, threadId),
-      threadId,
-      name: result.name,
-    };
-  }
-}
-
-// Module-level reference for IPC-triggered topic creation
-let activeTelegramChannel: TelegramChannel | null = null;
-
-export function getActiveTelegramChannel(): TelegramChannel | null {
-  return activeTelegramChannel;
 }
 
 registerChannel('telegram', (opts: ChannelOpts) => {
@@ -445,7 +409,5 @@ registerChannel('telegram', (opts: ChannelOpts) => {
     logger.warn('Telegram: TELEGRAM_BOT_TOKEN not set');
     return null;
   }
-  const channel = new TelegramChannel(token, opts);
-  activeTelegramChannel = channel;
-  return channel;
+  return new TelegramChannel(token, opts);
 });

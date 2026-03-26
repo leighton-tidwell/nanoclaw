@@ -37,7 +37,6 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
-  getTopicName,
   initDatabase,
   setRegisteredGroup,
   setRouterState,
@@ -233,17 +232,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  // Build prompt with topic context if in a forum topic
-  let topicContext = '';
-  if (threadId) {
-    const topicName = getTopicName(baseJid, threadId);
-    topicContext = topicName
-      ? `<topic name="${topicName}" thread_id="${threadId}" />\n`
-      : `<topic thread_id="${threadId}" />\n`;
-  } else {
-    topicContext = '<topic name="General" />\n';
-  }
-  const prompt = topicContext + formatMessages(missedMessages, TIMEZONE);
+  const prompt = formatMessages(missedMessages, TIMEZONE);
 
   const lastMessage = missedMessages[missedMessages.length - 1];
 
@@ -339,7 +328,9 @@ async function runAgent(
   const isMain = group.isMain === true;
   const { threadId } = parseTopicJid(chatJid);
   // Per-topic sessions: each topic gets its own session key
-  const sessionKey = threadId ? `${group.folder}#${threadId}` : group.folder;
+  const sessionKey = threadId
+    ? `${group.folder}#${threadId}`
+    : group.folder;
   const sessionId = sessions[sessionKey];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -391,13 +382,7 @@ async function runAgent(
         threadId,
       },
       (proc, containerName, ipcDir) =>
-        queue.registerProcess(
-          chatJid,
-          proc,
-          containerName,
-          group.folder,
-          ipcDir,
-        ),
+        queue.registerProcess(chatJid, proc, containerName, group.folder, ipcDir),
       wrappedOnOutput,
     );
 
@@ -469,7 +454,10 @@ async function startMessageLoop(): Promise<void> {
 
           const channel = findChannel(channels, topicJid);
           if (!channel) {
-            logger.warn({ topicJid }, 'No channel owns JID, skipping messages');
+            logger.warn(
+              { topicJid },
+              'No channel owns JID, skipping messages',
+            );
             continue;
           }
 

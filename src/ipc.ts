@@ -9,10 +9,7 @@ import {
   TELEGRAM_BOT_POOL,
   TIMEZONE,
 } from './config.js';
-import {
-  sendPoolMessage,
-  getActiveTelegramChannel,
-} from './channels/telegram.js';
+import { sendPoolMessage } from './channels/telegram.js';
 import { parseTopicJid, toTopicJid } from './topic-key.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
@@ -94,147 +91,110 @@ export function startIpcWatcher(deps: IpcDeps): void {
       }
 
       for (const { dir: ipcDir, threadId: topicThreadId } of ipcDirs) {
-        const messagesDir = path.join(ipcDir, 'messages');
-        const tasksDir = path.join(ipcDir, 'tasks');
+      const messagesDir = path.join(ipcDir, 'messages');
+      const tasksDir = path.join(ipcDir, 'tasks');
 
-        // Process messages from this group's IPC directory
-        try {
-          if (fs.existsSync(messagesDir)) {
-            const messageFiles = fs
-              .readdirSync(messagesDir)
-              .filter((f) => f.endsWith('.json'));
-            for (const file of messageFiles) {
-              const filePath = path.join(messagesDir, file);
-              try {
-                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-                if (data.type === 'message' && data.chatJid && data.text) {
-                  // Resolve the outbound JID: if this IPC came from a topic container,
-                  // construct a composite key so the reply goes to the right topic
-                  const { baseJid } = parseTopicJid(data.chatJid);
-                  const outboundJid = topicThreadId
-                    ? toTopicJid(baseJid, topicThreadId)
-                    : data.chatJid;
+      // Process messages from this group's IPC directory
+      try {
+        if (fs.existsSync(messagesDir)) {
+          const messageFiles = fs
+            .readdirSync(messagesDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of messageFiles) {
+            const filePath = path.join(messagesDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (data.type === 'message' && data.chatJid && data.text) {
+                // Resolve the outbound JID: if this IPC came from a topic container,
+                // construct a composite key so the reply goes to the right topic
+                const { baseJid } = parseTopicJid(data.chatJid);
+                const outboundJid = topicThreadId
+                  ? toTopicJid(baseJid, topicThreadId)
+                  : data.chatJid;
 
-                  // Authorization: verify this group can send to this chatJid
-                  const targetGroup = registeredGroups[baseJid];
+                // Authorization: verify this group can send to this chatJid
+                const targetGroup = registeredGroups[baseJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
                   if (
-                    isMain ||
-                    (targetGroup && targetGroup.folder === sourceGroup)
+                    data.sender &&
+                    outboundJid.startsWith('tg:') &&
+                    TELEGRAM_BOT_POOL.length > 0
                   ) {
-                    if (
-                      data.sender &&
-                      outboundJid.startsWith('tg:') &&
-                      TELEGRAM_BOT_POOL.length > 0
-                    ) {
-                      await sendPoolMessage(
-                        outboundJid,
-                        data.text,
-                        data.sender,
-                        sourceGroup,
-                      );
-                    } else {
-                      await deps.sendMessage(outboundJid, data.text);
-                    }
-                    logger.info(
-                      {
-                        chatJid: outboundJid,
-                        sourceGroup,
-                        sender: data.sender,
-                      },
-                      'IPC message sent',
+                    await sendPoolMessage(
+                      outboundJid,
+                      data.text,
+                      data.sender,
+                      sourceGroup,
                     );
                   } else {
-                    logger.warn(
-                      { chatJid: baseJid, sourceGroup },
-                      'Unauthorized IPC message attempt blocked',
-                    );
+                    await deps.sendMessage(outboundJid, data.text);
                   }
-                }
-                fs.unlinkSync(filePath);
-              } catch (err) {
-                logger.error(
-                  { file, sourceGroup, err },
-                  'Error processing IPC message',
-                );
-                const errorDir = path.join(ipcBaseDir, 'errors');
-                fs.mkdirSync(errorDir, { recursive: true });
-                fs.renameSync(
-                  filePath,
-                  path.join(errorDir, `${sourceGroup}-${file}`),
-                );
-              }
-            }
-          }
-        } catch (err) {
-          logger.error(
-            { err, sourceGroup },
-            'Error reading IPC messages directory',
-          );
-        }
-
-        // Process tasks from this group's IPC directory
-        try {
-          if (fs.existsSync(tasksDir)) {
-            const taskFiles = fs
-              .readdirSync(tasksDir)
-              .filter((f) => f.endsWith('.json'));
-            for (const file of taskFiles) {
-              const filePath = path.join(tasksDir, file);
-              try {
-                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-                // Handle create_topic with result callback
-                if (data.type === 'create_topic' && data.chatJid && data.name) {
-                  const resultPath = `${filePath}.result`;
-                  try {
-                    const tgChannel = getActiveTelegramChannel();
-                    if (!tgChannel) throw new Error('Telegram channel not active');
-                    const { baseJid } = parseTopicJid(data.chatJid);
-                    const result = await tgChannel.createTopic(baseJid, data.name);
-                    fs.writeFileSync(
-                      resultPath,
-                      JSON.stringify({
-                        threadId: result.threadId,
-                        name: result.name,
-                        topicJid: result.topicJid,
-                      }),
-                    );
-                    logger.info(
-                      { chatJid: baseJid, name: result.name, threadId: result.threadId },
-                      'Topic created via IPC',
-                    );
-                  } catch (err) {
-                    fs.writeFileSync(
-                      resultPath,
-                      JSON.stringify({ error: String(err) }),
-                    );
-                    logger.error({ err }, 'Failed to create topic via IPC');
-                  }
-                  fs.unlinkSync(filePath);
+                  logger.info(
+                    { chatJid: outboundJid, sourceGroup, sender: data.sender },
+                    'IPC message sent',
+                  );
                 } else {
-                // Pass source group identity to processTaskIpc for authorization
-                await processTaskIpc(data, sourceGroup, isMain, deps);
-                fs.unlinkSync(filePath);
+                  logger.warn(
+                    { chatJid: baseJid, sourceGroup },
+                    'Unauthorized IPC message attempt blocked',
+                  );
                 }
-              } catch (err) {
-                logger.error(
-                  { file, sourceGroup, err },
-                  'Error processing IPC task',
-                );
-                const errorDir = path.join(ipcBaseDir, 'errors');
-                fs.mkdirSync(errorDir, { recursive: true });
-                fs.renameSync(
-                  filePath,
-                  path.join(errorDir, `${sourceGroup}-${file}`),
-                );
               }
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC message',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-${file}`),
+              );
             }
           }
-        } catch (err) {
-          logger.error(
-            { err, sourceGroup },
-            'Error reading IPC tasks directory',
-          );
         }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC messages directory',
+        );
+      }
+
+      // Process tasks from this group's IPC directory
+      try {
+        if (fs.existsSync(tasksDir)) {
+          const taskFiles = fs
+            .readdirSync(tasksDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of taskFiles) {
+            const filePath = path.join(tasksDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              // Pass source group identity to processTaskIpc for authorization
+              await processTaskIpc(data, sourceGroup, isMain, deps);
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC task',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-${file}`),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
       } // end ipcDirs loop
     }
 
